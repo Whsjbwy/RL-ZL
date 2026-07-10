@@ -133,7 +133,7 @@ class ScenarioGenerator:
 
     def _sample_one_obstacle(self, rng: np.random.Generator) -> Obstacle:
         cfg = self.config.obstacles
-        kind = str(rng.choice(["sphere", "cylinder", "ellipsoid"]))
+        kind = str(rng.choice(cfg.types))
         xy_low = cfg.boundary_clearance_m
         x = rng.uniform(xy_low, self.world[0] - xy_low)
         y = rng.uniform(xy_low, self.world[1] - xy_low)
@@ -249,4 +249,3 @@ __all__ = [
     "ScenarioGenerator",
     "coarse_astar_path_length",
 ]
-

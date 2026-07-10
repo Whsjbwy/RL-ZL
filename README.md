@@ -1,6 +1,6 @@
-# RL-ZL：REMUS-100-like AUV Stage 0
+# RL-ZL：REMUS-100-like AUV Stage 0–1
 
-本仓库严格依据 **《REMUS100_RWPVSD_SAC_实验方案_V4_硬错误修订版》** 实现 RWPVSD-SAC 实验的 **Stage 0：环境与动力学验证**。当前版本只验证仿真基础是否正确，不包含正式 SAC/PER-SAC 训练结果，也不生成或伪造论文数据。
+本仓库严格依据 **《REMUS100_RWPVSD_SAC_实验方案_V4_硬错误修订版》** 实现 RWPVSD-SAC 实验的 **Stage 0：环境与动力学验证** 和 **Stage 1：低难度 SAC Teacher**。Stage 1 复用 Stage 0 的同一个环境，不复制或绕过动力学、感知、奖励与终止逻辑。
 
 ## 当前已实现
 
@@ -16,6 +16,17 @@
 - 成功、碰撞、边界、深度、动力学、振荡和超时分类；
 - 基于粗栅格 A* 的场景可通行性检查；
 - 固定随机种子复现、单元测试和三维轨迹验证图。
+
+Stage 1 在上述环境之上新增：
+
+- PyTorch tanh-Gaussian SAC actor，V4 教师结构 `53→256→256→128→(μ, logσ)`；
+- 双 Q critic、target critic、自动熵温度和 Polyak 软更新；
+- 区分 `terminated` 与时间截断 `truncated` 的经验回放，超时仍允许 Bellman bootstrap；
+- Stage 1A 无流 `4–6` 障碍和 Stage 1B 弱流 `6–8` 障碍 curriculum；
+- 固定验证种子、失败类型保留、训练/评估日志和原子 checkpoint；
+- 100 episode 最终测试与 V4 严格门槛：成功率 `>90%`、碰撞率 `≤10%`。
+
+当前仓库完成了 Stage 1 代码和短程 smoke run；短程运行只证明训练链路可执行，不代表教师已经训练达标，也不能作为论文结果。
 
 ## 放到 Windows 的 `D:\RL+ZL`
 
@@ -55,6 +66,44 @@ python scripts/run_stage0_cases.py --config configs/stage0.yaml
 python scripts/run_stage0_validation.py --config configs/stage0.yaml --episodes 20
 ```
 
+## Stage 1：先诊断，再正式训练
+
+先确认 PyTorch、CUDA 和 GPU：
+
+```powershell
+python scripts/check_device.py
+```
+
+运行 128 步端到端诊断。该命令会真实执行 replay 采样、SAC 反向传播、评估和 checkpoint 保存，但不会产生有效成功率：
+
+```powershell
+python scripts/run_stage1_smoke.py
+```
+
+诊断通过后，在 RTX 5060 上正式训练：
+
+```powershell
+python scripts/train_stage1_teacher.py --config configs/stage1_teacher.yaml --device cuda
+```
+
+训练中只有当前 curriculum 的固定验证成功率严格大于 90%，且碰撞率不高于 10%，才会进入下一难度。最终 checkpoint 必须独立测试 100 episodes：
+
+```powershell
+python scripts/evaluate_stage1_teacher.py `
+  --config configs/stage1_teacher.yaml `
+  --checkpoint artifacts/stage1_teacher/checkpoints/final.pt `
+  --episodes 100
+```
+
+长训练中断后可从模型和优化器状态继续；经验回放不会写进 checkpoint，恢复后会先重新收集样本再更新：
+
+```powershell
+python scripts/train_stage1_teacher.py `
+  --config configs/stage1_teacher.yaml `
+  --device cuda `
+  --resume artifacts/stage1_teacher/checkpoints/latest.pt
+```
+
 验证结果输出到：
 
 ```text
@@ -67,6 +116,13 @@ artifacts/stage0_cases/
 ├── stage0_cases.json
 ├── single_obstacle_avoidance.png
 └── single_obstacle_rays.png
+
+artifacts/stage1_teacher/
+├── summary.json
+├── training_episodes.jsonl
+├── training_updates.jsonl
+├── evaluations/
+└── checkpoints/
 ```
 
 Stage 0 通过标准：
@@ -84,9 +140,13 @@ Stage 0 通过标准：
 ```text
 RL-ZL/
 ├── configs/stage0.yaml
+├── configs/stage1_teacher.yaml
 ├── scripts/
 │   ├── check_device.py
-│   └── run_stage0_validation.py
+│   ├── run_stage0_validation.py
+│   ├── run_stage1_smoke.py
+│   ├── train_stage1_teacher.py
+│   └── evaluate_stage1_teacher.py
 ├── src/rl_zl/
 │   ├── config.py
 │   ├── current.py
@@ -96,10 +156,15 @@ RL-ZL/
 │   ├── obstacles.py
 │   ├── remus_dynamics.py
 │   ├── remus_env.py
-│   └── scenario.py
+│   ├── scenario.py
+│   ├── replay.py
+│   ├── sac.py
+│   ├── evaluation.py
+│   ├── training_config.py
+│   └── training.py
 └── tests/
 ```
 
 ## 科学边界
 
-该环境是 REMUS-100-like planning-level model，不是实艇推进器、水动力参数辨识或海试系统。角速度、执行器时间常数、奖励系数等均作为明确记录的仿真设计参数；后续正式实验必须冻结配置、训练/验证/测试种子与代码版本。
+该环境是 REMUS-100-like planning-level model，不是实艇推进器、水动力参数辨识或海试系统。角速度、执行器时间常数、奖励系数和未由 V4 固定的 SAC 超参数均作为明确记录的仿真设计参数；正式结果必须冻结配置、训练/验证/测试种子与代码版本。Stage 1 只实现普通 SAC Teacher；PER、Small-SAC 和蒸馏属于后续阶段，不在本阶段提前混入。

@@ -1,4 +1,4 @@
-"""Typed configuration for the Stage-0 simulation."""
+"""Typed configuration shared by the staged REMUS simulation."""
 
 from __future__ import annotations
 
@@ -69,6 +69,7 @@ class ObstacleConfig:
     cylinder_height_m: tuple[float, float]
     ellipsoid_axes_m: tuple[float, float]
     max_generation_attempts: int
+    types: tuple[str, ...] = ("sphere", "cylinder", "ellipsoid")
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,10 @@ class Stage0Config:
         vehicle["speed_command_range_mps"] = _pair(vehicle["speed_command_range_mps"])
 
         obstacles = dict(raw["obstacles"])
+        obstacles["types"] = tuple(
+            str(value).lower()
+            for value in obstacles.get("types", ("sphere", "cylinder", "ellipsoid"))
+        )
         obstacles["count_range"] = _pair(obstacles["count_range"], int)
         for key in (
             "sphere_radius_m",
@@ -199,6 +204,13 @@ class Stage0Config:
             raise ValueError("Invalid legal depth range")
         if self.current.max_speed_mps < 0:
             raise ValueError("current.max_speed_mps cannot be negative")
+        allowed_obstacles = {"sphere", "cylinder", "ellipsoid"}
+        if not self.obstacles.types:
+            raise ValueError("obstacles.types cannot be empty")
+        if not set(self.obstacles.types).issubset(allowed_obstacles):
+            raise ValueError(
+                f"Unsupported obstacle type(s): {set(self.obstacles.types) - allowed_obstacles}"
+            )
         if self.reward.dense_clip <= 0:
             raise ValueError("reward.dense_clip must be positive")
         if self.safety.cost_max <= 0:

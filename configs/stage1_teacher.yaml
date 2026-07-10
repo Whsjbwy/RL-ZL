@@ -1,0 +1,68 @@
+# V4 Stage 1: low-difficulty SAC teacher. Values not fixed by V4 are
+# recorded engineering defaults and must remain frozen across comparisons.
+seed: 20260710
+base_environment: stage0.yaml
+output_dir: artifacts/stage1_teacher
+device: auto
+deterministic_torch: true
+
+sac:
+  actor_hidden_dims: [256, 256, 128]
+  critic_hidden_dims: [256, 256, 128]
+  learning_rate: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  initial_alpha: 0.2
+  automatic_entropy_tuning: true
+  target_entropy: null
+  log_std_bounds: [-20.0, 2.0]
+  gradient_clip_norm: 10.0
+  target_update_interval: 1
+
+replay:
+  capacity: 1000000
+  batch_size: 256
+  learning_starts: 10000
+  update_after: 10000
+  updates_per_step: 1
+
+training:
+  evaluation_interval_steps: 10000
+  evaluation_episodes: 20
+  final_evaluation_episodes: 100
+  evaluation_seed: 120260710
+  checkpoint_interval_steps: 50000
+  log_interval_steps: 1000
+
+curriculum:
+  - name: stage1a_no_current
+    obstacle_types: [sphere, cylinder]
+    obstacle_count_range: [4, 6]
+    obstacle_radius_m: [8.0, 15.0]
+    goal_radius_m: 10.0
+    current_mode: none
+    current_max_speed_mps: 0.0
+    background_speed_mps: [0.0, 0.0]
+    vortex_count: [0, 0]
+    vortex_strength_mps: [0.0, 0.0]
+    time_amplitude_mps: [0.0, 0.0]
+    minimum_training_steps: 100000
+    maximum_training_steps: 300000
+    promotion_success_rate: 0.90
+    promotion_collision_rate: 0.10
+
+  - name: stage1b_weak_current
+    obstacle_types: [sphere, cylinder]
+    obstacle_count_range: [6, 8]
+    obstacle_radius_m: [8.0, 15.0]
+    goal_radius_m: 10.0
+    current_mode: weak
+    current_max_speed_mps: 0.15
+    background_speed_mps: [0.0, 0.15]
+    vortex_count: [0, 0]
+    vortex_strength_mps: [0.0, 0.0]
+    time_amplitude_mps: [0.0, 0.0]
+    minimum_training_steps: 100000
+    maximum_training_steps: 300000
+    promotion_success_rate: 0.90
+    promotion_collision_rate: 0.10

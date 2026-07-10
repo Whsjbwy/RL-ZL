@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rl-zl"
-version = "0.1.0"
-description = "Stage-0 REMUS-100-like 3-D AUV simulation for RWPVSD-SAC"
+version = "0.2.0"
+description = "Stage-0/1 REMUS-100-like 3-D AUV simulation and SAC teacher"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -30,3 +30,6 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+"tests/_support.py" = ["E402"]

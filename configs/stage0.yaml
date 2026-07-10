@@ -33,6 +33,7 @@ vehicle:
   tau_r_s: 1.0
 
 obstacles:
+  types: [sphere, cylinder, ellipsoid]
   count_range: [4, 6]
   inflation_margin_m: 3.0
   start_goal_clearance_m: 30.0
