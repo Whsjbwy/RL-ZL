@@ -68,6 +68,10 @@ python scripts/run_stage0_validation.py --config configs/stage0.yaml --episodes 
 
 ## Stage 1：先诊断，再正式训练
 
+如果使用 Codex 负责实验执行、调参和阶段验收，请先让它完整阅读
+[`docs/STAGE1_CODEX_EXECUTION_GATE.md`](docs/STAGE1_CODEX_EXECUTION_GATE.md)。该文件规定了
+Stage 1 的固定口径、数据隔离、调参顺序、交付物和进入 Stage 2 前的硬门槛。
+
 先确认 PyTorch、CUDA 和 GPU：
 
 ```powershell
