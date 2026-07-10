@@ -53,6 +53,9 @@ class Stage1Trainer:
         )
         self.total_steps = 0
         self.total_episodes = 0
+        self.resume_stage_index = 0
+        self.resume_stage_steps = 0
+        self.current_stage_steps = 0
         self.output_dir = config.output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.episode_log_path = self.output_dir / "training_episodes.jsonl"
@@ -65,6 +68,10 @@ class Stage1Trainer:
         metadata = self.agent.load(checkpoint_path)
         self.total_steps = int(metadata.get("total_steps", 0))
         self.total_episodes = int(metadata.get("total_episodes", 0))
+        self.resume_stage_index = int(metadata.get("stage_index", 0))
+        self.resume_stage_steps = int(metadata.get("stage_training_steps", 0))
+        if not 0 <= self.resume_stage_index < len(self.config.curriculum):
+            raise ValueError("Checkpoint curriculum stage is not present in the current config")
         return metadata
 
     def _checkpoint(self, name: str, stage_index: int, stage_name: str) -> Path:
@@ -76,6 +83,7 @@ class Stage1Trainer:
                 "total_episodes": self.total_episodes,
                 "stage_index": stage_index,
                 "stage_name": stage_name,
+                "stage_training_steps": self.current_stage_steps,
                 "seed": self.config.seed,
                 "replay_size": len(self.replay),
                 "note": "Replay contents are not embedded; resume refills replay before updates.",
@@ -130,6 +138,8 @@ class Stage1Trainer:
         last_stage_name = self.config.curriculum[0].name
 
         for stage_index, stage in enumerate(self.config.curriculum):
+            if stage_index < self.resume_stage_index:
+                continue
             if self.total_steps >= global_step_limit:
                 all_stages_passed = False
                 break
@@ -142,7 +152,11 @@ class Stage1Trainer:
             observation, _ = environment.reset(seed=episode_seed)
             episode_return = 0.0
             episode_steps = 0
-            stage_start_step = self.total_steps
+            carried_stage_steps = (
+                self.resume_stage_steps if stage_index == self.resume_stage_index else 0
+            )
+            stage_start_step = self.total_steps - carried_stage_steps
+            self.current_stage_steps = carried_stage_steps
             stage_passed = False
             best_success_rate = -1.0
             next_evaluation_step = self.total_steps + self.config.training.evaluation_interval_steps
@@ -171,6 +185,7 @@ class Stage1Trainer:
                 episode_return += float(reward)
                 episode_steps += 1
                 self.total_steps += 1
+                self.current_stage_steps = self.total_steps - stage_start_step
 
                 if (
                     self.total_steps >= self.config.replay.update_after
@@ -265,7 +280,7 @@ class Stage1Trainer:
                 )
             stage_result = {
                 "name": stage.name,
-                "training_steps": self.total_steps - stage_start_step,
+                "training_steps": self.current_stage_steps,
                 "total_steps": self.total_steps,
                 "gate_passed": stage_passed,
                 "gate": gate_summary.to_dict(include_records=False),
@@ -276,6 +291,8 @@ class Stage1Trainer:
                 all_stages_passed = False
             if not stage_passed and max_steps_override is None:
                 break
+            self.resume_stage_index = min(stage_index + 1, len(self.config.curriculum) - 1)
+            self.resume_stage_steps = 0
 
         if last_environment_config is None:
             last_environment_config = apply_curriculum_stage(
