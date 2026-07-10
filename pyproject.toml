@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-zl"
+version = "0.1.0"
+description = "Stage-0 REMUS-100-like 3-D AUV simulation for RWPVSD-SAC"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<3",
+  "PyYAML>=6.0",
+  "matplotlib>=3.8",
+  "gymnasium>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+torch = ["torch>=2.4"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+

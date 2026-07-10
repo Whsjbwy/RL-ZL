@@ -1,0 +1,91 @@
+seed: 20260709
+
+environment:
+  world_size_m: [500.0, 500.0, 100.0]
+  legal_depth_m: [5.0, 95.0]
+  start_goal_depth_m: [10.0, 90.0]
+  xy_margin_m: 30.0
+  start_goal_min_distance_m: 250.0
+  start_goal_max_distance_m: 500.0
+  goal_radius_m: 8.0
+  max_steps: 600
+  sensor_range_m: 80.0
+  oscillation_window: 50
+  oscillation_progress_m: 2.0
+  oscillation_radius_m: 15.0
+  timeout_as_truncation: true
+
+vehicle:
+  radius_m: 0.095
+  dt_s: 1.0
+  initial_speed_mps: 1.0
+  speed_state_range_mps: [0.5, 2.6]
+  speed_command_range_mps: [0.6, 2.0]
+  pitch_limit_deg: 25.0
+  pitch_rate_limit_deg_s: 8.0
+  yaw_rate_limit_deg_s: 12.0
+  pitch_rate_command_limit_deg_s: 4.0
+  yaw_rate_command_limit_deg_s: 6.0
+  pitch_command_delta_limit_deg_s: 2.0
+  yaw_command_delta_limit_deg_s: 3.0
+  tau_u_s: 2.0
+  tau_q_s: 1.0
+  tau_r_s: 1.0
+
+obstacles:
+  count_range: [4, 6]
+  inflation_margin_m: 3.0
+  start_goal_clearance_m: 30.0
+  boundary_clearance_m: 20.0
+  obstacle_separation_m: 8.0
+  sphere_radius_m: [8.0, 20.0]
+  cylinder_radius_m: [8.0, 18.0]
+  cylinder_height_m: [30.0, 75.0]
+  ellipsoid_axes_m: [10.0, 22.0]
+  max_generation_attempts: 300
+
+current:
+  mode: weak
+  max_speed_mps: 0.20
+  background_speed_mps: [0.00, 0.10]
+  vortex_count: [1, 2]
+  vortex_strength_mps: [0.03, 0.10]
+  vortex_core_radius_m: [45.0, 90.0]
+  time_amplitude_mps: [0.00, 0.03]
+  time_period_s: [180.0, 420.0]
+  vertical_fraction: 0.10
+
+feasibility:
+  enabled: true
+  grid_resolution_m: 20.0
+  path_budget_factor: 1.8
+  max_scenario_attempts: 60
+
+reward:
+  progress: 40.0
+  goal: 400.0
+  collision: 400.0
+  boundary: 0.0
+  depth: 250.0
+  dynamics: 0.0
+  oscillation: 0.0
+  clearance: 20.0
+  clearance_warning_m: 8.0
+  current: 0.2
+  energy: 0.05
+  energy_pitch_rate: 0.5
+  energy_yaw_rate: 0.5
+  smooth: 0.02
+  step: 0.01
+  dense_clip: 5.0
+
+safety:
+  cost_max: 3.0
+  boundary_warning_m: 15.0
+  depth_warning_m: 8.0
+  safe_pitch_fraction: 0.80
+  safe_rate_fraction: 0.80
+  obstacle_weight: 1.0
+  boundary_weight: 1.0
+  depth_weight: 1.0
+  dynamics_weight: 1.0
