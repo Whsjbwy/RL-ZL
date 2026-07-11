@@ -14,7 +14,15 @@ from .environment import REMUS100Env
 from .evaluation import EvaluationSummary, evaluate_policy
 from .replay import ReplayBuffer
 from .sac import SACAgent, SACUpdateMetrics, set_global_seeds
-from .training_config import Stage1TrainingConfig, apply_curriculum_stage
+from .training_config import (
+    Stage1TrainingConfig,
+    apply_curriculum_stage,
+    confirmation_due,
+    curriculum_gate_episode_count,
+    derive_resume_seed,
+    next_evaluation_step,
+    updates_allowed,
+)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -29,6 +37,35 @@ def _append_json_line(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
+
+
+def _episode_diagnostics(environment: REMUS100Env, info: dict[str, Any]) -> dict[str, Any]:
+    """Retain scenario and terminal dynamics fields needed for failure analysis."""
+    assert environment.scenario is not None and environment.state is not None
+    scenario = environment.scenario
+    state = environment.state
+    goal_delta = scenario.goal_m - scenario.start_m
+    horizontal_distance = float(np.linalg.norm(goal_delta[:2]))
+    return {
+        "start_m": [float(value) for value in scenario.start_m],
+        "goal_m": [float(value) for value in scenario.goal_m],
+        "vertical_delta_m": float(goal_delta[2]),
+        "initial_goal_pitch_deg": float(
+            np.rad2deg(np.arctan2(goal_delta[2], max(horizontal_distance, 1e-9)))
+        ),
+        "obstacle_count": len(scenario.obstacles),
+        "terminal_position_m": [float(value) for value in state.position_m],
+        "terminal_goal_distance_m": float(
+            info.get("goal_distance_m", np.linalg.norm(scenario.goal_m - state.position_m))
+        ),
+        "terminal_pitch_deg": float(np.rad2deg(state.pitch_rad)),
+        "terminal_pitch_rate_deg_s": float(np.rad2deg(state.pitch_rate_rad_s)),
+        "terminal_yaw_rate_deg_s": float(np.rad2deg(state.yaw_rate_rad_s)),
+        "terminal_current_speed_mps": float(
+            np.linalg.norm(info.get("current_velocity_mps", np.zeros(3)))
+        ),
+        "dynamics_diagnostics": dict(info.get("dynamics_diagnostics", {})),
+    }
 
 
 class Stage1Trainer:
@@ -55,6 +92,10 @@ class Stage1Trainer:
         self.total_episodes = 0
         self.resume_stage_index = 0
         self.resume_stage_steps = 0
+        self.resume_update_after_step = 0
+        self.resumed = False
+        self.resume_seed: int | None = None
+        self.confirmed_stage_indices: set[int] = set()
         self.current_stage_steps = 0
         self.output_dir = config.output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -70,8 +111,18 @@ class Stage1Trainer:
         self.total_episodes = int(metadata.get("total_episodes", 0))
         self.resume_stage_index = int(metadata.get("stage_index", 0))
         self.resume_stage_steps = int(metadata.get("stage_training_steps", 0))
+        self.confirmed_stage_indices = {
+            int(value) for value in metadata.get("confirmed_stage_indices", [])
+        }
         if not 0 <= self.resume_stage_index < len(self.config.curriculum):
             raise ValueError("Checkpoint curriculum stage is not present in the current config")
+        self.resumed = True
+        self.resume_seed = derive_resume_seed(
+            self.config.seed, self.total_steps, self.total_episodes
+        )
+        set_global_seeds(self.resume_seed, self.config.deterministic_torch)
+        self.rng = np.random.default_rng(self.resume_seed)
+        self.resume_update_after_step = self.total_steps + self.config.replay.resume_warmup_steps
         return metadata
 
     def _checkpoint(self, name: str, stage_index: int, stage_name: str) -> Path:
@@ -86,6 +137,10 @@ class Stage1Trainer:
                 "stage_training_steps": self.current_stage_steps,
                 "seed": self.config.seed,
                 "replay_size": len(self.replay),
+                "resume_update_after_step": self.resume_update_after_step,
+                "resume_seed": self.resume_seed,
+                "confirmed_stage_indices": sorted(self.confirmed_stage_indices),
+                "evaluation_protocol_version": 2,
                 "note": "Replay contents are not embedded; resume refills replay before updates.",
             },
         )
@@ -98,8 +153,24 @@ class Stage1Trainer:
         environment_config,
         episodes: int,
         suffix: str,
+        base_seed: int,
+        evaluation_split: str,
     ) -> EvaluationSummary:
-        seed = self.config.training.evaluation_seed + stage_index * 100_000
+        seed = int(base_seed) + stage_index * 100_000
+        print(
+            json.dumps(
+                {
+                    "event": "evaluation_started",
+                    "split": evaluation_split,
+                    "stage": stage_name,
+                    "total_steps": self.total_steps,
+                    "episodes": episodes,
+                    "base_seed": seed,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         summary = evaluate_policy(
             self.agent,
             environment_config,
@@ -112,9 +183,27 @@ class Stage1Trainer:
             "stage_name": stage_name,
             "total_steps": self.total_steps,
             "checkpoint_update_count": self.agent.update_count,
+            "evaluation_split": evaluation_split,
+            "base_seed": seed,
             **summary.to_dict(include_records=True),
         }
         _write_json(self.evaluation_dir / f"{stage_name}_{suffix}.json", payload)
+        print(
+            json.dumps(
+                {
+                    "event": "evaluation_finished",
+                    "split": evaluation_split,
+                    "stage": stage_name,
+                    "total_steps": self.total_steps,
+                    "episodes": episodes,
+                    "success_rate": summary.success_rate,
+                    "collision_rate": summary.collision_rate,
+                    "failure_counts": summary.failure_counts,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         return summary
 
     def run(
@@ -130,12 +219,66 @@ class Stage1Trainer:
         )
         if global_step_limit <= 0:
             raise ValueError("Training step limit must be positive")
+        if self.resumed:
+            print(
+                json.dumps(
+                    {
+                        "event": "resume_ready",
+                        "total_steps": self.total_steps,
+                        "stage_index": self.resume_stage_index,
+                        "stage_training_steps": self.resume_stage_steps,
+                        "resume_seed": self.resume_seed,
+                        "gradient_updates_resume_at_step": self.resume_update_after_step,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
 
         stage_results: list[dict[str, Any]] = []
         all_stages_passed = True
         last_environment_config = None
         last_stage_index = 0
         last_stage_name = self.config.curriculum[0].name
+
+        # Checkpoints created before the 100-episode confirmation protocol do
+        # not contain proof that earlier curriculum stages met the formal gate.
+        for prior_stage_index in range(self.resume_stage_index):
+            if prior_stage_index in self.confirmed_stage_indices:
+                continue
+            prior_stage = self.config.curriculum[prior_stage_index]
+            prior_environment_config = apply_curriculum_stage(
+                self.base_environment, prior_stage
+            )
+            prior_summary = self._evaluate(
+                prior_stage_index,
+                prior_stage.name,
+                prior_environment_config,
+                self.config.training.confirmation_evaluation_episodes,
+                suffix=f"resume_confirmation_step_{self.total_steps}",
+                base_seed=self.config.training.confirmation_seed,
+                evaluation_split="resume_protocol_confirmation",
+            )
+            prior_passed = bool(
+                prior_summary.success_rate > prior_stage.promotion_success_rate
+                and prior_summary.collision_rate <= prior_stage.promotion_collision_rate
+            )
+            stage_results.append(
+                {
+                    "name": prior_stage.name,
+                    "training_steps": 0,
+                    "total_steps": self.total_steps,
+                    "resume_protocol_confirmation": True,
+                    "gate_passed": prior_passed,
+                    "gate": prior_summary.to_dict(include_records=False),
+                }
+            )
+            if not prior_passed:
+                raise RuntimeError(
+                    f"Resume checkpoint failed the required 100-episode confirmation "
+                    f"for {prior_stage.name}; do not continue to a harder curriculum stage."
+                )
+            self.confirmed_stage_indices.add(prior_stage_index)
 
         for stage_index, stage in enumerate(self.config.curriculum):
             if stage_index < self.resume_stage_index:
@@ -159,7 +302,14 @@ class Stage1Trainer:
             self.current_stage_steps = carried_stage_steps
             stage_passed = False
             best_success_rate = -1.0
-            next_evaluation_step = self.total_steps + self.config.training.evaluation_interval_steps
+            gate_summary: EvaluationSummary | None = None
+            last_confirmation_step: int | None = None
+            scheduled_evaluation_step = next_evaluation_step(
+                stage_start_step,
+                self.total_steps,
+                stage.minimum_training_steps,
+                self.config.training.evaluation_interval_steps,
+            )
             next_checkpoint_step = self.total_steps + self.config.training.checkpoint_interval_steps
             next_log_step = self.total_steps + self.config.training.log_interval_steps
 
@@ -187,9 +337,11 @@ class Stage1Trainer:
                 self.total_steps += 1
                 self.current_stage_steps = self.total_steps - stage_start_step
 
-                if (
-                    self.total_steps >= self.config.replay.update_after
-                    and len(self.replay) >= self.config.replay.batch_size
+                if updates_allowed(
+                    self.total_steps,
+                    len(self.replay),
+                    self.config.replay,
+                    self.resume_update_after_step,
                 ):
                     for _ in range(self.config.replay.updates_per_step):
                         self.last_update_metrics = self.agent.update(
@@ -212,6 +364,7 @@ class Stage1Trainer:
                             "minimum_obstacle_distance_m": float(
                                 info.get("minimum_obstacle_distance_m", environment_config.environment.sensor_range_m)
                             ),
+                            **_episode_diagnostics(environment, info),
                         },
                     )
                     episode_seed = int(self.rng.integers(0, 2**31 - 1))
@@ -238,7 +391,7 @@ class Stage1Trainer:
                 stage_steps = self.total_steps - stage_start_step
                 if (
                     stage_steps >= stage.minimum_training_steps
-                    and self.total_steps >= next_evaluation_step
+                    and self.total_steps >= scheduled_evaluation_step
                 ):
                     summary = self._evaluate(
                         stage_index,
@@ -246,38 +399,72 @@ class Stage1Trainer:
                         environment_config,
                         self.config.training.evaluation_episodes,
                         suffix=f"step_{self.total_steps}",
+                        base_seed=self.config.training.validation_seed,
+                        evaluation_split="validation_trend",
                     )
                     if summary.success_rate > best_success_rate:
                         best_success_rate = summary.success_rate
                         self._checkpoint(f"best_{stage.name}.pt", stage_index, stage.name)
-                    stage_passed = bool(
+                    trend_candidate = bool(
                         summary.success_rate > stage.promotion_success_rate
                         and summary.collision_rate <= stage.promotion_collision_rate
                     )
-                    next_evaluation_step += self.config.training.evaluation_interval_steps
+                    should_confirm = confirmation_due(
+                        trend_candidate,
+                        self.total_steps,
+                        last_confirmation_step,
+                        self.config.training.confirmation_interval_steps,
+                    )
+                    if should_confirm:
+                        last_confirmation_step = self.total_steps
+                        gate_summary = self._evaluate(
+                            stage_index,
+                            stage.name,
+                            environment_config,
+                            self.config.training.confirmation_evaluation_episodes,
+                            suffix=f"confirmation_step_{self.total_steps}",
+                            base_seed=self.config.training.confirmation_seed,
+                            evaluation_split="curriculum_confirmation",
+                        )
+                        stage_passed = bool(
+                            gate_summary.success_rate > stage.promotion_success_rate
+                            and gate_summary.collision_rate <= stage.promotion_collision_rate
+                        )
+                    scheduled_evaluation_step = next_evaluation_step(
+                        stage_start_step,
+                        self.total_steps,
+                        stage.minimum_training_steps,
+                        self.config.training.evaluation_interval_steps,
+                    )
                     if stage_passed:
                         break
 
             environment.close()
 
             # Always produce a gate record, including short smoke runs and exhausted budgets.
-            gate_episodes = (
-                int(final_evaluation_episodes_override)
-                if final_evaluation_episodes_override is not None
-                else self.config.training.evaluation_episodes
+            gate_episodes = curriculum_gate_episode_count(
+                self.config.training,
+                final_evaluation_episodes_override,
             )
-            gate_summary = self._evaluate(
-                stage_index,
-                stage.name,
-                environment_config,
-                gate_episodes,
-                suffix=f"gate_step_{self.total_steps}",
-            )
-            if max_steps_override is None:
-                stage_passed = bool(
-                    gate_summary.success_rate > stage.promotion_success_rate
-                    and gate_summary.collision_rate <= stage.promotion_collision_rate
+            if gate_summary is None or not stage_passed:
+                gate_summary = self._evaluate(
+                    stage_index,
+                    stage.name,
+                    environment_config,
+                    gate_episodes,
+                    suffix=f"gate_step_{self.total_steps}",
+                    base_seed=self.config.training.confirmation_seed,
+                    evaluation_split=(
+                        "smoke_gate"
+                        if final_evaluation_episodes_override is not None
+                        else "curriculum_confirmation"
+                    ),
                 )
+                if max_steps_override is None:
+                    stage_passed = bool(
+                        gate_summary.success_rate > stage.promotion_success_rate
+                        and gate_summary.collision_rate <= stage.promotion_collision_rate
+                    )
             stage_result = {
                 "name": stage.name,
                 "training_steps": self.current_stage_steps,
@@ -286,6 +473,8 @@ class Stage1Trainer:
                 "gate": gate_summary.to_dict(include_records=False),
             }
             stage_results.append(stage_result)
+            if stage_passed and max_steps_override is None:
+                self.confirmed_stage_indices.add(stage_index)
             self._checkpoint("latest.pt", stage_index, stage.name)
             if not stage_passed:
                 all_stages_passed = False
@@ -310,6 +499,12 @@ class Stage1Trainer:
             last_environment_config,
             final_episodes,
             suffix="final",
+            base_seed=self.config.training.final_test_seed,
+            evaluation_split=(
+                "smoke_final"
+                if final_evaluation_episodes_override is not None
+                else "independent_final_test"
+            ),
         )
         final_checkpoint = self._checkpoint("final.pt", last_stage_index, last_stage_name)
         result = {
@@ -320,6 +515,11 @@ class Stage1Trainer:
             "total_episodes": self.total_episodes,
             "updates": self.agent.update_count,
             "replay_size": len(self.replay),
+            "resumed": self.resumed,
+            "resume_update_after_step": self.resume_update_after_step,
+            "resume_seed": self.resume_seed,
+            "evaluation_protocol_version": 2,
+            "confirmed_stage_indices": sorted(self.confirmed_stage_indices),
             "curriculum_results": stage_results,
             "all_curriculum_stages_passed": all_stages_passed,
             "final_evaluation": final_summary.to_dict(include_records=False),
@@ -329,8 +529,10 @@ class Stage1Trainer:
             "final_checkpoint": str(final_checkpoint),
             "elapsed_seconds": time.time() - started_at,
             "note": (
-                "A smoke run validates code execution only. The V4 gate requires a full "
-                "100-episode evaluation with success rate strictly above 90%."
+                "A smoke run validates code execution only."
+                if max_steps_override is not None
+                else "Curriculum promotion and the independent final test each use at least "
+                "100 episodes; the V4 gate requires success rate strictly above 90%."
             ),
         }
         _write_json(self.output_dir / "summary.json", result)

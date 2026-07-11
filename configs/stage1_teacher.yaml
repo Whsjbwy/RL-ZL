@@ -25,12 +25,22 @@ replay:
   learning_starts: 10000
   update_after: 10000
   updates_per_step: 1
+  # Replay contents are intentionally not embedded in checkpoints. After a
+  # resume, collect this many fresh transitions before gradient updates.
+  resume_warmup_steps: 10000
 
 training:
   evaluation_interval_steps: 10000
+  # Twenty episodes are a low-cost trend screen only; they cannot promote a stage.
   evaluation_episodes: 20
+  # At most one costly confirmation is run within each 50k-step window.
+  confirmation_interval_steps: 50000
+  confirmation_evaluation_episodes: 100
   final_evaluation_episodes: 100
-  evaluation_seed: 120260710
+  # Disjoint deterministic seed blocks prevent validation/test leakage.
+  validation_seed: 120260710
+  confirmation_seed: 220260710
+  final_test_seed: 320260710
   checkpoint_interval_steps: 50000
   log_interval_steps: 1000
 

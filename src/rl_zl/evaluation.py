@@ -27,6 +27,19 @@ class EpisodeMetrics:
     travel_time_s: float
     energy_proxy: float
     minimum_clearance_m: float
+    start_m: tuple[float, float, float]
+    goal_m: tuple[float, float, float]
+    vertical_delta_m: float
+    initial_goal_pitch_deg: float
+    obstacle_count: int
+    initial_current_speed_mps: float
+    terminal_position_m: tuple[float, float, float]
+    terminal_goal_distance_m: float
+    terminal_pitch_deg: float
+    terminal_pitch_rate_deg_s: float
+    terminal_yaw_rate_deg_s: float
+    terminal_current_speed_mps: float
+    dynamics_diagnostics: dict
 
 
 @dataclass(frozen=True)
@@ -92,6 +105,16 @@ def evaluate_policy(
     for episode_index in range(episodes):
         episode_seed = int(base_seed + episode_index)
         observation, _ = environment.reset(seed=episode_seed)
+        assert environment.scenario is not None
+        scenario = environment.scenario
+        goal_delta = scenario.goal_m - scenario.start_m
+        horizontal_distance = float(np.linalg.norm(goal_delta[:2]))
+        initial_goal_pitch_deg = float(
+            np.rad2deg(np.arctan2(goal_delta[2], max(horizontal_distance, 1e-9)))
+        )
+        initial_current_speed = float(
+            np.linalg.norm(scenario.current.velocity(scenario.start_m, 0.0))
+        )
         terminated = truncated = False
         episode_return = 0.0
         energy_proxy = 0.0
@@ -130,6 +153,28 @@ def evaluate_policy(
                 travel_time_s=(len(trajectory) - 1) * environment_config.vehicle.dt_s,
                 energy_proxy=float(energy_proxy),
                 minimum_clearance_m=float(minimum_clearance),
+                start_m=tuple(float(value) for value in scenario.start_m),
+                goal_m=tuple(float(value) for value in scenario.goal_m),
+                vertical_delta_m=float(goal_delta[2]),
+                initial_goal_pitch_deg=initial_goal_pitch_deg,
+                obstacle_count=len(scenario.obstacles),
+                initial_current_speed_mps=initial_current_speed,
+                terminal_position_m=tuple(float(value) for value in environment.state.position_m),
+                terminal_goal_distance_m=float(
+                    info.get(
+                        "goal_distance_m",
+                        np.linalg.norm(scenario.goal_m - environment.state.position_m),
+                    )
+                ),
+                terminal_pitch_deg=float(np.rad2deg(environment.state.pitch_rad)),
+                terminal_pitch_rate_deg_s=float(
+                    np.rad2deg(environment.state.pitch_rate_rad_s)
+                ),
+                terminal_yaw_rate_deg_s=float(np.rad2deg(environment.state.yaw_rate_rad_s)),
+                terminal_current_speed_mps=float(
+                    np.linalg.norm(info.get("current_velocity_mps", np.zeros(3)))
+                ),
+                dynamics_diagnostics=dict(info.get("dynamics_diagnostics", {})),
             )
         )
     environment.close()

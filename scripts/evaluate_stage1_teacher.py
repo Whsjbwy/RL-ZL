@@ -20,6 +20,18 @@ def main() -> int:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--curriculum-index", type=int, default=-1)
     parser.add_argument("--episodes", type=int, default=100)
+    parser.add_argument(
+        "--seed-split",
+        choices=("validation", "confirmation", "final_test"),
+        default="final_test",
+        help="Use a documented, disjoint evaluation seed block.",
+    )
+    parser.add_argument(
+        "--base-seed",
+        type=int,
+        default=None,
+        help="Explicitly override the selected seed block (recorded in output).",
+    )
     parser.add_argument("--output", default="artifacts/stage1_teacher/evaluation_manual.json")
     args = parser.parse_args()
 
@@ -39,16 +51,28 @@ def main() -> int:
         parser.error(str(exc))
     agent = SACAgent(53, 3, config.sac, device=config.device)
     agent.load(ROOT / args.checkpoint, load_optimizers=False)
+    configured_seeds = {
+        "validation": config.training.validation_seed,
+        "confirmation": config.training.confirmation_seed,
+        "final_test": config.training.final_test_seed,
+    }
+    base_seed = int(
+        args.base_seed
+        if args.base_seed is not None
+        else configured_seeds[args.seed_split] + stage_index * 100_000
+    )
     summary = evaluate_policy(
         agent,
         environment_config,
         episodes=args.episodes,
-        base_seed=config.training.evaluation_seed + stage_index * 100_000,
+        base_seed=base_seed,
         deterministic=True,
     )
     result = {
         "stage": stage.name,
         "checkpoint": args.checkpoint,
+        "seed_split": args.seed_split,
+        "base_seed": base_seed,
         **summary.to_dict(include_records=True),
         "stage1_gate_passed": summary.stage1_gate_passes(),
     }

@@ -5,7 +5,13 @@ import unittest
 import numpy as np
 
 from _support import stage0_config
-from rl_zl.evaluation import EvaluationSummary
+from rl_zl.evaluation import EvaluationSummary, evaluate_policy
+
+
+class ConstantPolicy:
+    def select_action(self, observation, deterministic: bool = False):
+        del observation, deterministic
+        return np.zeros(3, dtype=np.float32)
 
 
 class EvaluationTests(unittest.TestCase):
@@ -32,6 +38,23 @@ class EvaluationTests(unittest.TestCase):
     def test_environment_config_remains_finite(self):
         config = stage0_config()
         self.assertTrue(np.isfinite(config.environment.goal_radius_m))
+
+    def test_episode_records_retain_scenario_and_terminal_diagnostics(self):
+        summary = evaluate_policy(
+            ConstantPolicy(),
+            stage0_config(),
+            episodes=1,
+            base_seed=987_654,
+        )
+        record = summary.records[0]
+        self.assertEqual(record.seed, 987_654)
+        self.assertEqual(len(record.start_m), 3)
+        self.assertEqual(len(record.goal_m), 3)
+        self.assertEqual(len(record.terminal_position_m), 3)
+        self.assertGreater(record.obstacle_count, 0)
+        self.assertTrue(np.isfinite(record.initial_goal_pitch_deg))
+        self.assertTrue(np.isfinite(record.terminal_pitch_rate_deg_s))
+        self.assertIsInstance(record.dynamics_diagnostics, dict)
 
 
 if __name__ == "__main__":

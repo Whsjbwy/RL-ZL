@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import yaml
 
 from .config import Stage0Config, load_config
@@ -49,14 +50,19 @@ class ReplayConfig:
     learning_starts: int
     update_after: int
     updates_per_step: int
+    resume_warmup_steps: int = 10_000
 
 
 @dataclass(frozen=True)
 class TrainingLoopConfig:
     evaluation_interval_steps: int
     evaluation_episodes: int
+    confirmation_interval_steps: int
+    confirmation_evaluation_episodes: int
     final_evaluation_episodes: int
-    evaluation_seed: int
+    validation_seed: int
+    confirmation_seed: int
+    final_test_seed: int
     checkpoint_interval_steps: int
     log_interval_steps: int
 
@@ -112,8 +118,27 @@ class Stage1TrainingConfig:
             raise ValueError("Replay capacity must be at least one batch")
         if self.replay.update_after < self.replay.batch_size:
             raise ValueError("replay.update_after must be at least replay.batch_size")
+        if self.replay.resume_warmup_steps < self.replay.batch_size:
+            raise ValueError("replay.resume_warmup_steps must be at least replay.batch_size")
+        if self.training.evaluation_interval_steps <= 0:
+            raise ValueError("training.evaluation_interval_steps must be positive")
+        if self.training.evaluation_episodes <= 0:
+            raise ValueError("training.evaluation_episodes must be positive")
+        if self.training.confirmation_interval_steps <= 0:
+            raise ValueError("training.confirmation_interval_steps must be positive")
+        if self.training.confirmation_evaluation_episodes < 100:
+            raise ValueError("V4 Stage-1 curriculum confirmation requires at least 100 episodes")
         if self.training.final_evaluation_episodes < 100:
             raise ValueError("V4 Stage-1 final evaluation requires at least 100 episodes")
+        evaluation_seeds = {
+            self.training.validation_seed,
+            self.training.confirmation_seed,
+            self.training.final_test_seed,
+        }
+        if len(evaluation_seeds) != 3:
+            raise ValueError("Validation, confirmation and final-test seeds must be distinct")
+        if self.training.checkpoint_interval_steps <= 0 or self.training.log_interval_steps <= 0:
+            raise ValueError("Checkpoint and log intervals must be positive")
         for stage in self.curriculum:
             if stage.minimum_training_steps < 0:
                 raise ValueError(f"{stage.name}: minimum_training_steps cannot be negative")
@@ -168,6 +193,21 @@ def load_stage1_config(path: str | Path) -> Stage1TrainingConfig:
     if not output_path.is_absolute():
         output_path = config_path.parent.parent / output_path
 
+    replay_raw = dict(raw["replay"])
+    replay_raw.setdefault("resume_warmup_steps", 10_000)
+    training_raw = dict(raw["training"])
+    legacy_evaluation_seed = training_raw.pop("evaluation_seed", None)
+    if legacy_evaluation_seed is not None:
+        training_raw.setdefault("validation_seed", int(legacy_evaluation_seed))
+    validation_seed = int(training_raw.get("validation_seed", 120_260_710))
+    training_raw.setdefault("validation_seed", validation_seed)
+    training_raw.setdefault("confirmation_seed", validation_seed + 100_000_000)
+    training_raw.setdefault("final_test_seed", validation_seed + 200_000_000)
+    training_raw.setdefault("confirmation_evaluation_episodes", 100)
+    training_raw.setdefault(
+        "confirmation_interval_steps", int(training_raw["checkpoint_interval_steps"])
+    )
+
     config = Stage1TrainingConfig(
         seed=int(raw["seed"]),
         base_environment_path=base_path.resolve(),
@@ -175,12 +215,77 @@ def load_stage1_config(path: str | Path) -> Stage1TrainingConfig:
         device=str(raw.get("device", "auto")),
         deterministic_torch=bool(raw.get("deterministic_torch", True)),
         sac=SACAlgorithmConfig(**sac_raw),
-        replay=ReplayConfig(**raw["replay"]),
-        training=TrainingLoopConfig(**raw["training"]),
+        replay=ReplayConfig(**replay_raw),
+        training=TrainingLoopConfig(**training_raw),
         curriculum=tuple(_parse_curriculum_stage(item) for item in raw["curriculum"]),
     )
     config.validate()
     return config
+
+
+def next_evaluation_step(
+    stage_start_step: int,
+    current_step: int,
+    minimum_training_steps: int,
+    interval_steps: int,
+) -> int:
+    """Return the next stage-relative evaluation step without catch-up bursts."""
+    if interval_steps <= 0:
+        raise ValueError("interval_steps must be positive")
+    first_step = int(stage_start_step) + max(int(minimum_training_steps), int(interval_steps))
+    if current_step < first_step:
+        return first_step
+    intervals_elapsed = (int(current_step) - first_step) // int(interval_steps) + 1
+    return first_step + intervals_elapsed * int(interval_steps)
+
+
+def updates_allowed(
+    total_steps: int,
+    replay_size: int,
+    replay: ReplayConfig,
+    resume_update_after_step: int = 0,
+) -> bool:
+    """Centralize fresh-run and post-resume replay warm-up requirements."""
+    update_after_step = max(int(replay.update_after), int(resume_update_after_step))
+    return bool(total_steps >= update_after_step and replay_size >= replay.batch_size)
+
+
+def confirmation_due(
+    trend_candidate: bool,
+    current_step: int,
+    last_confirmation_step: int | None,
+    interval_steps: int,
+) -> bool:
+    """Limit costly formal confirmations while never promoting on a trend screen."""
+    if interval_steps <= 0:
+        raise ValueError("interval_steps must be positive")
+    return bool(
+        trend_candidate
+        and (
+            last_confirmation_step is None
+            or int(current_step) - int(last_confirmation_step) >= int(interval_steps)
+        )
+    )
+
+
+def curriculum_gate_episode_count(
+    training: TrainingLoopConfig,
+    diagnostic_override: int | None = None,
+) -> int:
+    """Keep formal gates at 100+ episodes while allowing explicit smoke diagnostics."""
+    if diagnostic_override is not None:
+        if diagnostic_override <= 0:
+            raise ValueError("diagnostic_override must be positive")
+        return int(diagnostic_override)
+    return int(training.confirmation_evaluation_episodes)
+
+
+def derive_resume_seed(base_seed: int, total_steps: int, total_episodes: int) -> int:
+    """Create a reproducible continuation seed that does not replay the fresh-run stream."""
+    sequence = np.random.SeedSequence(
+        [int(base_seed), int(total_steps), int(total_episodes), 0x52534D45]
+    )
+    return int(sequence.generate_state(1, dtype=np.uint32)[0])
 
 
 def apply_curriculum_stage(
@@ -217,5 +322,10 @@ __all__ = [
     "Stage1TrainingConfig",
     "TrainingLoopConfig",
     "apply_curriculum_stage",
+    "confirmation_due",
+    "curriculum_gate_episode_count",
+    "derive_resume_seed",
     "load_stage1_config",
+    "next_evaluation_step",
+    "updates_allowed",
 ]

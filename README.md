@@ -23,8 +23,10 @@ Stage 1 在上述环境之上新增：
 - 双 Q critic、target critic、自动熵温度和 Polyak 软更新；
 - 区分 `terminated` 与时间截断 `truncated` 的经验回放，超时仍允许 Bellman bootstrap；
 - Stage 1A 无流 `4–6` 障碍和 Stage 1B 弱流 `6–8` 障碍 curriculum；
-- 固定验证种子、失败类型保留、训练/评估日志和原子 checkpoint；
-- 100 episode 最终测试与 V4 严格门槛：成功率 `>90%`、碰撞率 `≤10%`。
+- 验证筛查、curriculum 确认和最终测试使用三组互不重叠的固定种子；
+- 20 episode 仅作趋势筛查，curriculum 晋级必须额外通过 100 episode 确认；
+- 评估记录保留场景几何、终端姿态/角速度与动力学裁剪诊断；
+- 独立 100 episode 最终测试与 V4 严格门槛：成功率 `>90%`、碰撞率 `≤10%`。
 
 当前仓库完成了 Stage 1 代码和短程 smoke run；短程运行只证明训练链路可执行，不代表教师已经训练达标，也不能作为论文结果。
 
@@ -90,16 +92,17 @@ python scripts/run_stage1_smoke.py
 python scripts/train_stage1_teacher.py --config configs/stage1_teacher.yaml --device cuda
 ```
 
-训练中只有当前 curriculum 的固定验证成功率严格大于 90%，且碰撞率不高于 10%，才会进入下一难度。最终 checkpoint 必须独立测试 100 episodes：
+训练中的 20 回合固定验证只负责发现候选 checkpoint；候选还必须在另一组固定种子上通过 100 回合确认（成功率严格大于 90%，碰撞率不高于 10%），才会进入下一难度。最终 checkpoint 再使用第三组独立种子测试 100 episodes：
 
 ```powershell
 python scripts/evaluate_stage1_teacher.py `
   --config configs/stage1_teacher.yaml `
   --checkpoint artifacts/stage1_teacher/checkpoints/final.pt `
-  --episodes 100
+  --episodes 100 `
+  --seed-split final_test
 ```
 
-长训练中断后可从模型和优化器状态继续；经验回放不会写进 checkpoint，恢复后会先重新收集样本再更新：
+长训练中断后可从模型和优化器状态继续；经验回放不会写进 checkpoint，恢复后固定先收集 10,000 条新样本，再恢复梯度更新：
 
 ```powershell
 python scripts/train_stage1_teacher.py `
